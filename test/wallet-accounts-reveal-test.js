@@ -8,6 +8,7 @@ const Network = require('../lib/protocol/network');
 const FullNode = require('../lib/node/fullnode');
 const Address = require('../lib/primitives/address');
 const rules = require('../lib/covenants/rules');
+const {WalletClient} = require('hs-client');
 
 const network = Network.get('regtest');
 
@@ -15,6 +16,10 @@ const node = new FullNode({
   memory: true,
   network: 'regtest',
   plugins: [require('../lib/wallet/plugin')]
+});
+
+const wclient = new WalletClient({
+  port: network.walletPort
 });
 
 const {wdb} = node.require('walletdb');
@@ -33,6 +38,7 @@ async function mineBlocks(n, addr) {
 describe('One wallet, two accounts, one name', function() {
   before(async () => {
     await node.open();
+    await wclient.open();
 
     wallet = await wdb.create();
 
@@ -44,6 +50,7 @@ describe('One wallet, two accounts, one name', function() {
   });
 
   after(async () => {
+    await wclient.close();
     await node.close();
   });
 
@@ -84,7 +91,7 @@ describe('One wallet, two accounts, one name', function() {
       assert(bid.own);
   });
 
-  it('should send REVEAL from one account at a time', async () => {
+  it('should send REVEAL from one account at a time -- LIBRARY', async () => {
     const tx1 = await wallet.sendReveal(name, {account: 'alice'});
     assert(tx1);
 
@@ -96,8 +103,61 @@ describe('One wallet, two accounts, one name', function() {
     await wallet.abandon(tx2.hash());
   });
 
-  it('should send REVEAL from all accounts', async () => {
+  it('should send REVEAL from all accounts -- LIBRARY', async () => {
     const tx = await wallet.sendRevealAll();
     assert(tx);
+
+    // Reset for next test
+    await wallet.abandon(tx.hash());
+  });
+
+  it('should send REVEAL from one account at a time -- HTTP', async () => {
+    const tx1 = await wclient.post(`/wallet/${wallet.id}/reveal`, {
+      name: name,
+      account: 'alice'
+    });
+    assert(tx1);
+
+    const tx2 = await wclient.post(`/wallet/${wallet.id}/reveal`, {
+      name: name,
+      account: 'bob'
+    });
+    assert(tx2);
+
+    // Reset for next test
+    await wallet.abandon(Buffer.from(tx1.hash, 'hex'));
+    await wallet.abandon(Buffer.from(tx2.hash, 'hex'));
+  });
+
+  it('should send REVEAL from all accounts -- HTTP', async () => {
+    const tx = await wclient.post(`/wallet/${wallet.id}/reveal`, {
+      name: name
+    });
+    assert(tx);
+
+    // Reset for next test
+    await wallet.abandon(Buffer.from(tx.hash, 'hex'));
+  });
+
+  it('should send REVEAL from one account at a time -- RPC', async () => {
+    await wclient.execute('selectwallet', [wallet.id]);
+
+    const tx1 = await wclient.execute('sendreveal', [name, 'alice']);
+    assert(tx1);
+
+    const tx2 = await wclient.execute('sendreveal', [name, 'bob']);
+    assert(tx2);
+
+    // Reset for next test
+    await wallet.abandon(Buffer.from(tx1.hash, 'hex'));
+    await wallet.abandon(Buffer.from(tx2.hash, 'hex'));
+  });
+
+  it('should send REVEAL from all accounts -- RPC', async () => {
+    const tx = await wclient.execute('sendreveal', [name]);
+    assert(tx);
+
+    // Reset for next test
+    await wallet.abandon(Buffer.from(tx.hash, 'hex'));
   });
 });
