@@ -15,9 +15,10 @@ const Network = require('../lib/protocol/network');
 const FullNode = require('../lib/node/fullnode');
 const MTX = require('../lib/primitives/mtx');
 const {isSignatureEncoding, isKeyEncoding} = require('../lib/script/common');
-const Resource = require('../lib/dns/resource');
+const {Resource} = require('../lib/dns/resource');
 const Address = require('../lib/primitives/address');
 const Output = require('../lib/primitives/output');
+const HD = require('../lib/hd/hd');
 const rules = require('../lib/covenants/rules');
 const {types} = rules;
 const secp256k1 = require('bcrypto/lib/secp256k1');
@@ -60,7 +61,7 @@ const {
 // TODO: convert to using hs-client methods
 // when the new version is published
 describe('Wallet HTTP', function() {
-  this.timeout(15000);
+  this.timeout(20000);
 
   before(async () => {
     await node.open();
@@ -84,6 +85,25 @@ describe('Wallet HTTP', function() {
 
   afterEach(async () => {
     await node.mempool.reset();
+  });
+
+  it('should get key by address from watch-only', async () => {
+    const phrase = 'abandon abandon abandon abandon abandon abandon '
+      + 'abandon abandon abandon abandon abandon about';
+    const master = HD.HDPrivateKey.fromPhrase(phrase);
+    const xprv = master.deriveAccount(44, 5355, 5);
+    const xpub = xprv.toPublic();
+    const pubkey = xpub.derive(0).derive(0);
+    const addr = Address.fromPubkey(pubkey.publicKey);
+    const wallet = wclient.wallet('watchonly');
+    await wclient.createWallet('watchonly', {
+      watchOnly: true,
+      accountKey: xpub.xpubkey('regtest')
+    });
+    const key = await wallet.getKey(addr.toString('regtest'));
+    assert.equal(xpub.childIndex ^ HD.common.HARDENED, key.account);
+    assert.equal(0, key.branch);
+    assert.equal(0, key.index);
   });
 
   it('should mine to the primary/default wallet', async () => {
@@ -811,7 +831,12 @@ describe('Wallet HTTP', function() {
       const json = await wallet.client.post(`/wallet/${wallet.id}/update`, {
         name: name,
         data: {
-          text: ['foobar']
+          records: [
+            {
+              type: 'TXT',
+              txt: ['foobar']
+            }
+          ]
         }
       });
 
@@ -827,7 +852,12 @@ describe('Wallet HTTP', function() {
       const json = await wallet.client.post(`/wallet/${wallet.id}/update`, {
         name: name,
         data: {
-          text: ['barfoo']
+          records: [
+            {
+              type: 'TXT',
+              txt: ['barfoo']
+            }
+          ]
         }
       });
 
@@ -884,7 +914,12 @@ describe('Wallet HTTP', function() {
     await wallet.client.post(`/wallet/${wallet.id}/update`, {
       name: name,
       data: {
-        text: ['foobar']
+        records: [
+          {
+            type: 'TXT',
+            txt: ['foobar']
+          }
+        ]
       }
     });
 
@@ -924,7 +959,12 @@ describe('Wallet HTTP', function() {
     await wallet.client.post(`/wallet/${wallet.id}/update`, {
       name: name,
       data: {
-        text: ['foobar']
+        records: [
+          {
+            type: 'TXT',
+            txt: ['foobar']
+          }
+        ]
       }
     });
 
@@ -965,7 +1005,12 @@ describe('Wallet HTTP', function() {
     await wallet.client.post(`/wallet/${wallet.id}/update`, {
       name: name,
       data: {
-        text: ['foobar']
+        records: [
+          {
+            type: 'TXT',
+            txt: ['foobar']
+          }
+        ]
       }
     });
 
@@ -1019,7 +1064,12 @@ describe('Wallet HTTP', function() {
     await wallet.client.post(`/wallet/${wallet.id}/update`, {
       name: name,
       data: {
-        text: ['foobar']
+        records: [
+          {
+            type: 'TXT',
+            txt: ['foobar']
+          }
+        ]
       }
     });
 
@@ -1075,7 +1125,12 @@ describe('Wallet HTTP', function() {
     await wallet.client.post(`/wallet/${wallet.id}/update`, {
       name: name,
       data: {
-        text: ['foobar']
+        records: [
+          {
+            type: 'TXT',
+            txt: ['foobar']
+          }
+        ]
       }
     });
 
