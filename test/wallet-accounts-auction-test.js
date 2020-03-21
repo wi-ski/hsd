@@ -62,7 +62,7 @@ describe('Multiple accounts participating in same auction', function() {
     await node.close();
   });
 
-  it('should fund both accounts', async () => {
+  it.only('should fund both accounts', async () => {
     await mineBlocks(2, aliceReceive);
     await mineBlocks(2, bobReceive);
 
@@ -76,7 +76,7 @@ describe('Multiple accounts participating in same auction', function() {
     assert(bobBal.confirmed === 2000 * 2 * 1e6);
   });
 
-  it('should open an auction and proceed to REVEAL phase', async () => {
+  it.only('should open an auction and proceed to REVEAL phase', async () => {
     await wallet.sendOpen(name, false, {account: 0});
     await mineBlocks(network.names.treeInterval + 2);
     let ns = await node.chain.db.getNameStateByName(name);
