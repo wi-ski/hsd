@@ -1,5 +1,6 @@
 /* eslint-env mocha */
 /* eslint prefer-arrow-callback: "off" */
+/* eslint no-implicit-coercion: "off" */
 
 'use strict';
 
@@ -18,8 +19,8 @@ const KeyRing = require('../lib/primitives/keyring');
 const Input = require('../lib/primitives/input');
 const Outpoint = require('../lib/primitives/outpoint');
 const Script = require('../lib/script/script');
-const PrivateKey = require('../lib/hd/private.js');
 const policy = require('../lib/protocol/policy');
+const HDPrivateKey = require('../lib/hd/private');
 
 const KEY1 = 'xprv9s21ZrQH143K3Aj6xQBymM31Zb4BVc7wxqfUhMZrzewdDVCt'
   + 'qUP9iWfcHgJofs25xbaUpCps9GDXj83NiWvQCAkWQhVj5J4CorfnpKX94AZ';
@@ -1227,7 +1228,7 @@ describe('Wallet', function() {
       );
     }
 
-    const privateKey = PrivateKey.generate();
+    const privateKey = HDPrivateKey.generate();
     const xpub = privateKey.xpubkey('main');
     watchWallet = await wdb.create({
       watchOnly: true,
@@ -1579,6 +1580,165 @@ describe('Wallet', function() {
     });
   });
 
+  it('should create credit if not found during confirmation', async () => {
+    // Create wallet and get one address
+    const wallet = await wdb.create();
+    const addr1 = await wallet.receiveAddress();
+
+    // Outside the wallet, generate a second private key and address.
+    const key2 = HDPrivateKey.generate();
+    const ring2 = KeyRing.fromPrivate(key2.privateKey);
+    const addr2 = ring2.getAddress();
+
+    // Build TX to both addresses, known and unknown
+    const mtx = new MTX();
+    mtx.addOutpoint(new Outpoint(Buffer.alloc(32), 0));
+    mtx.addOutput(addr1, 1020304);
+    mtx.addOutput(addr2, 4030201);
+    const tx = mtx.toTX();
+    const hash = tx.hash();
+
+    // Add unconfirmed TX to txdb (no block provided)
+    await wallet.txdb.add(tx, null);
+
+    // Check
+    const bal1 = await wallet.getBalance();
+    assert.strictEqual(bal1.tx, 1);
+    assert.strictEqual(bal1.coin, 1);
+    assert.strictEqual(bal1.confirmed, 0);
+    assert.strictEqual(bal1.unconfirmed, 1020304);
+
+    // Import private key into wallet
+    assert(!await wallet.hasAddress(addr2));
+    await wallet.importKey('default', ring2);
+    assert(await wallet.hasAddress(addr2));
+
+    // Confirm TX with newly-added output address
+    // Create dummy block
+    const block = {
+      height: 100,
+      hash: Buffer.alloc(32),
+      time: Date.now()
+    };
+
+    // Get TX from txdb
+    const wtx = await wallet.txdb.getTX(hash);
+
+    // Confirm TX with dummy block in txdb
+    const details = await wallet.txdb.confirm(wtx, block);
+    assert.bufferEqual(details.tx.hash(), hash);
+
+    // Check balance
+    const bal2 = await wallet.getBalance();
+    assert.strictEqual(bal2.confirmed, bal2.unconfirmed);
+    assert.strictEqual(bal2.confirmed, 5050505);
+    assert.strictEqual(bal2.coin, 2);
+    assert.strictEqual(bal2.tx, 1);
+
+    // Check for unconfirmed transactions
+    const pending = await wallet.getPending();
+    assert.strictEqual(pending.length, 0);
+
+    // Check history for TX
+    const history = await wallet.getHistory();
+    const wtxs = await wallet.toDetails(history);
+    assert.strictEqual(wtxs.length, 1);
+    assert.bufferEqual(wtxs[0].hash, hash);
+
+    // Both old and new credits are not "owned"
+    // (created by the wallet spending its own coins)
+    for (let i = 0; i < tx.outputs.length; i++) {
+      const credit = await wallet.txdb.getCredit(tx.hash(), i);
+      assert(!credit.own);
+    }
+  });
+
+  it('should create owned credit if not found during confirm', async () => {
+    // Create wallet and get one address
+    const wallet = await wdb.create();
+    const addr1 = await wallet.receiveAddress();
+
+    // Outside the wallet, generate a second private key and address.
+    const key2 = HDPrivateKey.generate();
+    const ring2 = KeyRing.fromPrivate(key2.privateKey);
+    const addr2 = ring2.getAddress();
+
+    // Create a confirmed, unspent, wallet-owned credit in txdb
+    const mtx1 = new MTX();
+    mtx1.addOutpoint(new Outpoint(Buffer.alloc(32), 0));
+    mtx1.addOutput(addr1, 1 * 1e8);
+    const tx1 = mtx1.toTX();
+    await wallet.txdb.add(tx1, null);
+
+    // Create dummy block
+    const block1 = {
+      height: 99,
+      hash: Buffer.alloc(32),
+      time: Date.now()
+    };
+    // Get TX from txdb
+    const wtx1 = await wallet.txdb.getTX(tx1.hash());
+
+    // Confirm TX with dummy block in txdb
+    await wallet.txdb.confirm(wtx1, block1);
+
+    // Build TX to both addresses, known and unknown
+    const mtx2 = new MTX();
+    mtx2.addTX(tx1, 0, 99);
+    mtx2.addOutput(addr1, 1020304);
+    mtx2.addOutput(addr2, 4030201);
+    const tx2 = mtx2.toTX();
+    const hash = tx2.hash();
+
+    // Add unconfirmed TX to txdb (no block provided)
+    await wallet.txdb.add(tx2, null);
+
+    // Check
+    const bal1 = await wallet.getBalance();
+    assert.strictEqual(bal1.tx, 2);
+    assert.strictEqual(bal1.coin, 1);
+    assert.strictEqual(bal1.confirmed, 1 * 1e8);
+    assert.strictEqual(bal1.unconfirmed, 1020304);
+
+    // Import private key into wallet
+    assert(!await wallet.hasAddress(addr2));
+    await wallet.importKey('default', ring2);
+    assert(await wallet.hasAddress(addr2));
+
+    // Confirm TX with newly-added output address
+    // Create dummy block
+    const block2 = {
+      height: 100,
+      hash: Buffer.alloc(32),
+      time: Date.now()
+    };
+
+    // Get TX from txdb
+    const wtx2 = await wallet.txdb.getTX(hash);
+
+    // Confirm TX with dummy block in txdb
+    const details = await wallet.txdb.confirm(wtx2, block2);
+    assert.bufferEqual(details.tx.hash(), hash);
+
+    // Check balance
+    const bal2 = await wallet.getBalance();
+    assert.strictEqual(bal2.confirmed, bal2.unconfirmed);
+    assert.strictEqual(bal2.confirmed, 5050505);
+    assert.strictEqual(bal2.coin, 2);
+    assert.strictEqual(bal2.tx, 2);
+
+    // Check for unconfirmed transactions
+    const pending = await wallet.getPending();
+    assert.strictEqual(pending.length, 0);
+
+    // Both old and new credits are "owned"
+    // (created by the wallet spending its own coins)
+    for (let i = 0; i < tx2.outputs.length; i++) {
+      const credit = await wallet.txdb.getCredit(tx2.hash(), i);
+      assert(credit.own);
+    }
+  });
+
   it('should cleanup', async () => {
     network.coinbaseMaturity = 2;
     await wdb.close();
@@ -1640,6 +1800,300 @@ describe('Wallet', function() {
         wallet.network.txStart = ACTUAL_TXSTART;
         wdb.height = ACTUAL_HEIGHT;
       }
+    });
+  });
+
+  describe('TXDB locked balance', function() {
+    const network = Network.get('regtest');
+    const workers = new WorkerPool({ enabled });
+    const wdb = new WalletDB({ network, workers });
+    const name = 'satoshi';
+    const value = 1e6;
+    const lockup = 2e6;
+    const fee = 10000;
+    let wallet;
+
+    before(async () => {
+      await wdb.open();
+      wallet = await wdb.create();
+      // rollout all names
+      wdb.height = 52 * 144 * 7;
+    });
+
+    after(async () => {
+      await wdb.close();
+    });
+
+    it('should fund wallet', async () => {
+      const addr = await wallet.receiveAddress();
+
+      // Fund wallet
+      const mtx = new MTX();
+      mtx.addOutpoint(new Outpoint(Buffer.alloc(32), 0));
+      mtx.addOutput(addr, 10e6);
+      const tx = mtx.toTX();
+
+      // Dummy block
+      const block = {
+        height: wdb.height + 1,
+        hash: Buffer.alloc(32),
+        time: Date.now()
+      };
+
+      // Add confirmed funding TX to wallet
+      await wallet.txdb.add(tx, block);
+
+      // Check
+      const bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 1);
+      assert.strictEqual(bal.coin, 1);
+      assert.strictEqual(bal.confirmed, 10e6);
+      assert.strictEqual(bal.unconfirmed, 10e6);
+      assert.strictEqual(bal.ulocked, 0);
+      assert.strictEqual(bal.clocked, 0);
+    });
+
+    it('should send and confirm OPEN', async () => {
+      const open = await wallet.sendOpen(name, false, {hardFee: fee});
+
+      // Check
+      let bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 2);
+      assert.strictEqual(bal.coin, 2);
+      assert.strictEqual(bal.confirmed, 10e6);
+      assert.strictEqual(bal.unconfirmed, 10e6 - fee);
+      assert.strictEqual(bal.ulocked, 0);
+      assert.strictEqual(bal.clocked, 0);
+
+      // Confirm OPEN
+      const block = {
+        height: wdb.height + 1,
+        hash: Buffer.alloc(32),
+        time: Date.now()
+      };
+      await wallet.txdb.add(open, block);
+
+      // Check
+      bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 2);
+      assert.strictEqual(bal.coin, 2);
+      assert.strictEqual(bal.confirmed, 10e6 - (1 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (1 * fee));
+      assert.strictEqual(bal.ulocked, 0);
+      assert.strictEqual(bal.clocked, 0);
+    });
+
+    it('should send and confirm BID', async () => {
+      // Advance to bidding
+      wdb.height += network.names.treeInterval + 1;
+
+      const bid = await wallet.sendBid(name, value, lockup, {hardFee: fee});
+
+      // Check
+      let bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 3);
+      assert.strictEqual(bal.coin, 3);
+      assert.strictEqual(bal.confirmed, 10e6 - (1 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (2 * fee));
+      assert.strictEqual(bal.ulocked, lockup);
+      assert.strictEqual(bal.clocked, 0);
+
+      // Confirm BID
+      const block = {
+        height: wdb.height + 1,
+        hash: Buffer.alloc(32),
+        time: Date.now()
+      };
+      await wallet.txdb.add(bid, block);
+
+      // Check
+      bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 3);
+      assert.strictEqual(bal.coin, 3);
+      assert.strictEqual(bal.confirmed, 10e6 - (2 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (2 * fee));
+      assert.strictEqual(bal.ulocked, lockup);
+      assert.strictEqual(bal.clocked, lockup);
+    });
+
+    it('should send and confirm REVEAL', async () => {
+      // Advance to reveal
+      wdb.height += network.names.biddingPeriod;
+
+      const reveal = await wallet.sendReveal(name, {hardFee: fee});
+
+      // Check
+      let bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 4);
+      assert.strictEqual(bal.coin, 4);
+      assert.strictEqual(bal.confirmed, 10e6 - (2 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (3 * fee));
+      assert.strictEqual(bal.ulocked, value);
+      assert.strictEqual(bal.clocked, lockup);
+
+      // Confirm BID
+      const block = {
+        height: wdb.height + 1,
+        hash: Buffer.alloc(32),
+        time: Date.now()
+      };
+      await wallet.txdb.add(reveal, block);
+
+      // Check
+      bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 4);
+      assert.strictEqual(bal.coin, 4);
+      assert.strictEqual(bal.confirmed, 10e6 - (3 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (3 * fee));
+      assert.strictEqual(bal.ulocked, value);
+      assert.strictEqual(bal.clocked, value);
+    });
+  });
+
+  describe('TXDB locked balance after simulated rescan', function() {
+    const network = Network.get('regtest');
+    const workers = new WorkerPool({ enabled });
+    const wdb = new WalletDB({ network, workers });
+    const name = 'satoshi';
+    const value = 1e6;
+    const lockup = 2e6;
+    const fee = 10000;
+    let wallet;
+
+    before(async () => {
+      await wdb.open();
+      wallet = await wdb.create();
+      // rollout all names
+      wdb.height = 52 * 144 * 7;
+    });
+
+    after(async () => {
+      await wdb.close();
+    });
+
+    it('should fund wallet', async () => {
+      const addr = await wallet.receiveAddress();
+
+      // Fund wallet
+      const mtx = new MTX();
+      mtx.addOutpoint(new Outpoint(Buffer.alloc(32), 0));
+      mtx.addOutput(addr, 10e6);
+      const tx = mtx.toTX();
+
+      // Dummy block
+      const block = {
+        height: wdb.height + 1,
+        hash: Buffer.alloc(32),
+        time: Date.now()
+      };
+
+      // Add confirmed funding TX to wallet
+      await wallet.txdb.add(tx, block);
+
+      // Check
+      const bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 1);
+      assert.strictEqual(bal.coin, 1);
+      assert.strictEqual(bal.confirmed, 10e6);
+      assert.strictEqual(bal.unconfirmed, 10e6);
+      assert.strictEqual(bal.ulocked, 0);
+      assert.strictEqual(bal.clocked, 0);
+    });
+
+    it('should confirm new OPEN', async () => {
+      const open = await wallet.createOpen(name, false, {hardFee: fee});
+
+      // Check
+      let bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 1);
+      assert.strictEqual(bal.coin, 1);
+      assert.strictEqual(bal.confirmed, 10e6);
+      assert.strictEqual(bal.unconfirmed, 10e6);
+      assert.strictEqual(bal.ulocked, 0);
+      assert.strictEqual(bal.clocked, 0);
+
+      // Confirm OPEN
+      const block = {
+        height: wdb.height + 1,
+        hash: Buffer.alloc(32),
+        time: Date.now()
+      };
+      await wallet.txdb.add(open.toTX(), block);
+
+      // Check
+      bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 2);
+      assert.strictEqual(bal.coin, 2);
+      assert.strictEqual(bal.confirmed, 10e6 - (1 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (1 * fee));
+      assert.strictEqual(bal.ulocked, 0);
+      assert.strictEqual(bal.clocked, 0);
+    });
+
+    it('should confirm new BID', async () => {
+      // Advance to bidding
+      wdb.height += network.names.treeInterval + 1;
+
+      const bid = await wallet.createBid(name, value, lockup, {hardFee: fee});
+
+      // Check
+      let bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 2);
+      assert.strictEqual(bal.coin, 2);
+      assert.strictEqual(bal.confirmed, 10e6 - (1 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (1 * fee));
+      assert.strictEqual(bal.ulocked, 0);
+      assert.strictEqual(bal.clocked, 0);
+
+      // Confirm BID
+      const block = {
+        height: wdb.height + 1,
+        hash: Buffer.alloc(32),
+        time: Date.now()
+      };
+      await wallet.txdb.add(bid.toTX(), block);
+
+      // Check
+      bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 3);
+      assert.strictEqual(bal.coin, 3);
+      assert.strictEqual(bal.confirmed, 10e6 - (2 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (2 * fee));
+      assert.strictEqual(bal.ulocked, lockup);
+      assert.strictEqual(bal.clocked, lockup);
+    });
+
+    it('should confirm new REVEAL', async () => {
+      // Advance to reveal
+      wdb.height += network.names.biddingPeriod;
+
+      const reveal = await wallet.createReveal(name, {hardFee: fee});
+
+      // Check
+      let bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 3);
+      assert.strictEqual(bal.coin, 3);
+      assert.strictEqual(bal.confirmed, 10e6 - (2 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (2 * fee));
+      assert.strictEqual(bal.ulocked, lockup);
+      assert.strictEqual(bal.clocked, lockup);
+
+      // Confirm BID
+      const block = {
+        height: wdb.height + 1,
+        hash: Buffer.alloc(32),
+        time: Date.now()
+      };
+      await wallet.txdb.add(reveal.toTX(), block);
+
+      // Check
+      bal = await wallet.getBalance();
+      assert.strictEqual(bal.tx, 4);
+      assert.strictEqual(bal.coin, 4);
+      assert.strictEqual(bal.confirmed, 10e6 - (3 * fee));
+      assert.strictEqual(bal.unconfirmed, 10e6 - (3 * fee));
+      assert.strictEqual(bal.ulocked, value);
+      assert.strictEqual(bal.clocked, value);
     });
   });
 });
